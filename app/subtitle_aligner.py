@@ -165,7 +165,8 @@ def align_script_to_entries(script_text: str, entries: List[SubtitleEntry]) -> L
         original = entry.plain_text
         # Find similar content in script
         similar = find_similar_content(original, script_text)
-        chunks.append(similar)
+        refined = refine_chunk(original, similar, script_text)
+        chunks.append(refined)
     return chunks
 
 
@@ -257,6 +258,53 @@ def format_srt(
     """Format entries and chunks into complete SRT text."""
     blocks = format_entries(entries, chunks, manual_breaks)
     return "\n\n".join(blocks) + "\n"
+
+
+SUFFIX_CANDIDATES = "吗嗎嗎呢啦喇啊呀啰啵啲！!？?。．."
+LEADING_PUNCT = "，,。.!！？?；;：:、… “”\"'（）()《》〈〉-—  "
+
+
+def refine_chunk(original: str, candidate: str, script_text: str) -> str:
+    stripped_original = original.strip()
+    if not candidate.strip():
+        short = stripped_original
+        if short and len(short) <= 6:
+            idx = script_text.find(short)
+            if idx != -1:
+                return script_text[idx:idx + len(short)]
+        return candidate
+
+    refined = candidate
+    refined = _trim_leading_noise(refined, stripped_original)
+    refined = _align_suffix(refined, stripped_original, script_text)
+    return refined
+
+
+def _trim_leading_noise(text: str, target: str) -> str:
+    trimmed = text
+    target_start = target[:1]
+    while trimmed and trimmed[0] in LEADING_PUNCT and trimmed[0] != target_start:
+        trimmed = trimmed[1:]
+    return trimmed
+
+
+def _align_suffix(candidate: str, original: str, script_text: str) -> str:
+    original = original.strip()
+    if not original:
+        return candidate
+
+    last_char = original[-1]
+    trimmed_candidate = candidate.rstrip()
+
+    if last_char in SUFFIX_CANDIDATES and not trimmed_candidate.endswith(last_char):
+        idx = script_text.find(candidate)
+        if idx != -1:
+            suffix_pos = idx + len(candidate)
+            if suffix_pos < len(script_text):
+                next_char = script_text[suffix_pos]
+                if next_char == last_char:
+                    trimmed_candidate = (candidate + last_char).strip()
+    return trimmed_candidate
 
 
 __all__ = [
