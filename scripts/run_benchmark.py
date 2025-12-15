@@ -11,12 +11,13 @@ import sys
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from app.services.translation import TranslationError, translate_subtitles_to_cantonese
 from app.subtitle_aligner import align_script_to_entries, prepare_script_text
 from app.subtitle_core import SubtitleEntry, parse_srt_text, wrap_chunk
 
@@ -36,6 +37,11 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("baseline"),
         help="Directory that contains scripts/, input_subtitles/, groundtruth/ folders.",
+    )
+    parser.add_argument(
+        "--translate-subtitles",
+        action="store_true",
+        help="Use DeepSeek to translate Mandarin subtitles into Cantonese before alignment.",
     )
     return parser.parse_args()
 
@@ -94,10 +100,16 @@ def _find_first_existing(directory: Path, filenames: List[str]) -> Path | None:
     return None
 
 
-def evaluate_sample(sample: Sample) -> Dict[str, List[float]]:
+def evaluate_sample(sample: Sample, translate_subtitles: bool = False) -> List[float]:
     script_text = sample.script_path.read_text(encoding="utf-8")
     input_srt = sample.input_sub_path.read_text(encoding="utf-8")
     gt_srt = sample.groundtruth_path.read_text(encoding="utf-8")
+
+    if translate_subtitles:
+        try:
+            input_srt = translate_subtitles_to_cantonese(input_srt)
+        except TranslationError as exc:
+            raise RuntimeError(f"{sample.name}: 字幕翻译失败 - {exc}") from exc
 
     entries = parse_srt_text(input_srt)
     gt_entries = parse_srt_text(gt_srt)
@@ -110,7 +122,6 @@ def evaluate_sample(sample: Sample) -> Dict[str, List[float]]:
     if len(chunks) != len(entries):
         raise ValueError(f"{sample.name}: 输出数量与字幕条目不一致。")
 
-    scores: Dict[str, List[float]] = {"v1": []}
     algo_scores: List[float] = []
     for entry, chunk, gt_entry in zip(entries, chunks, gt_entries):
         wrapped = wrap_chunk(chunk, entry.line_count)
@@ -118,8 +129,7 @@ def evaluate_sample(sample: Sample) -> Dict[str, List[float]]:
         plain_gt = _normalize_plain(" ".join(gt_entry.text_lines))
         ratio = SequenceMatcher(None, plain_pred, plain_gt).ratio()
         algo_scores.append(ratio)
-    scores["v1"] = algo_scores
-    return scores
+    return algo_scores
 
 
 def _normalize_plain(text: str) -> str:
@@ -148,12 +158,12 @@ def main() -> None:
     args = parse_args()
     samples = discover_samples(args.baseline_dir)
 
-    aggregated: Dict[str, List[float]] = {"v1": []}
+    algo_key = "v1_translated" if args.translate_subtitles else "v1"
+    aggregated: Dict[str, List[float]] = {algo_key: []}
 
     for sample in samples:
-        scores = evaluate_sample(sample)
-        for algo, algo_scores in scores.items():
-            aggregated[algo].extend(algo_scores)
+        algo_scores = evaluate_sample(sample, translate_subtitles=args.translate_subtitles)
+        aggregated[algo_key].extend(algo_scores)
 
     summarize_scores(aggregated)
 

@@ -12,7 +12,7 @@
 
 ## 本地运行
 
-1. 安装依赖（确保已安装 `uv`，或使用其它包管理器安装 `requests` 等所需库）：
+1. 安装依赖（建议使用 `uv pip install -r requirements.txt`，或使用其它包管理器安装 `requests`、`openai` 等库）：
    ```bash
    pip install -r requirements.txt
    ```
@@ -33,6 +33,16 @@
 python3 scripts/run_benchmark.py
 ```
 默认会读取 `baseline/` 下的脚本、输入字幕和人工字幕，统计整体相似度。
+
+## 可选：普通话字幕自动翻译为粤语
+
+上传页新增“自动将普通话字幕翻译为粤语白话（DeepSeek）”勾选项。启用前需在根目录创建 `.env` 并配置 DeepSeek Key：
+
+```
+DEEPSEEK_API_KEY=sk-xxxx
+```
+
+勾选后，系统会在对齐前调用 DeepSeek 将整个 SRT 转成粤语白话（简体字），再进入 V1 算法流程。若未配置 Key 或调用失败，上传会提示错误。
 
 ## 目录清理与提交
 

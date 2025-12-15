@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs
 
+from .services.translation import TranslationError, translate_subtitles_to_cantonese
 from .subtitle_aligner import align_script_to_entries, prepare_script_text
 from .subtitle_core import SubtitleEntry, format_entries, parse_srt_text
 
@@ -171,6 +172,15 @@ class SubtitleRequestHandler(BaseHTTPRequestHandler):
               <small>算法会自动匹配脚本与字幕，可在结果页手动微调。</small>
             </div>
           </div>
+          <label class="form-field checkbox-field">
+            <span class="checkbox-option">
+              <input type="checkbox" name="enable_translation" value="1" />
+              <span>
+                <strong>自动将普通话字幕翻译为粤语白话（DeepSeek）</strong>
+                <small>需在 .env 设置 DEEPSEEK_API_KEY，翻译后再进行对齐。</small>
+              </span>
+            </span>
+          </label>
           <button type="submit" class="btn primary" id="submit-btn">开始校对</button>
         </form>
       </section>
@@ -307,6 +317,8 @@ class SubtitleRequestHandler(BaseHTTPRequestHandler):
             return
         script_item = form.get("script_file")
         srt_item = form.get("srt_file")
+        translate_flag_raw = form.get("enable_translation", "")
+        translate_flag = str(translate_flag_raw).lower() in {"1", "true", "yes", "on"}
         if not isinstance(script_item, SimpleUpload):
             body = self.render_upload("缺少脚本文件。")
             self._send_html(body, HTTPStatus.BAD_REQUEST)
@@ -317,6 +329,16 @@ class SubtitleRequestHandler(BaseHTTPRequestHandler):
             return
         script_raw = script_item.file.read().decode("utf-8", errors="ignore")
         srt_raw = srt_item.file.read().decode("utf-8", errors="ignore")
+        translation_message = None
+        if translate_flag:
+            try:
+                srt_raw = translate_subtitles_to_cantonese(srt_raw)
+                translation_message = "已使用 DeepSeek 将字幕翻译为粤语白话。"
+            except TranslationError as exc:
+                LOGGER.warning("Subtitle translation failed: %s", exc)
+                body = self.render_upload(f"字幕翻译失败：{exc}")
+                self._send_html(body, HTTPStatus.BAD_REQUEST)
+                return
 
         try:
             prepared_script = prepare_script_text(script_raw)
@@ -341,6 +363,7 @@ class SubtitleRequestHandler(BaseHTTPRequestHandler):
         page = self.render_review(
             payload_entries,
             session_id,
+            message=translation_message,
             script_name=script_item.filename,
             srt_name=srt_item.filename,
         )
