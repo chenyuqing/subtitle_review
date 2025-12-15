@@ -1,0 +1,16 @@
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments & tools
+.venv/
+.uv-cache/
+
+# Local runtime files
+.DS_Store
+.server.pid
+*.log
+
+# Generated test outputs
+test_output_*.srt
