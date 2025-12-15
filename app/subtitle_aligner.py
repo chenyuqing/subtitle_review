@@ -260,24 +260,25 @@ def format_srt(
     return "\n\n".join(blocks) + "\n"
 
 
-SUFFIX_CANDIDATES = "吗嗎嗎呢啦喇啊呀啰啵啲！!？?。．."
+SUFFIX_CANDIDATES = "吗嗎呢啦喇啊呀啰啵啲！!？?。．."
 LEADING_PUNCT = "，,。.!！？?；;：:、… “”\"'（）()《》〈〉-—  "
+SHORT_FALLBACK_LEN = 8
 
 
 def refine_chunk(original: str, candidate: str, script_text: str) -> str:
     stripped_original = original.strip()
-    if not candidate.strip():
-        short = stripped_original
-        if short and len(short) <= 6:
-            idx = script_text.find(short)
-            if idx != -1:
-                return script_text[idx:idx + len(short)]
+    cleaned_candidate = candidate.strip()
+
+    if not cleaned_candidate:
+        direct = _direct_short_match(stripped_original, script_text)
+        if direct:
+            return direct
         return candidate
 
-    refined = candidate
+    refined = cleaned_candidate
     refined = _trim_leading_noise(refined, stripped_original)
     refined = _align_suffix(refined, stripped_original, script_text)
-    return refined
+    return refined.strip()
 
 
 def _trim_leading_noise(text: str, target: str) -> str:
@@ -317,3 +318,19 @@ __all__ = [
     "format_entries",
     "format_srt",
 ]
+def _direct_short_match(original: str, script_text: str) -> str:
+    if not original:
+        return ""
+    plain = original.replace("《", "").replace("》", "")
+    plain = plain.strip()
+    if not plain or len(plain) > SHORT_FALLBACK_LEN:
+        return ""
+    candidates = [plain, plain.replace("．", ".")]
+    for cand in candidates:
+        idx = script_text.find(cand)
+        if idx != -1:
+            return script_text[idx:idx + len(cand)]
+        idx_ci = script_text.lower().find(cand.lower())
+        if idx_ci != -1:
+            return script_text[idx_ci:idx_ci + len(cand)]
+    return ""
