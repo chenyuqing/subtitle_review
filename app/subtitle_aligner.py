@@ -262,6 +262,7 @@ def format_srt(
 
 SUFFIX_CANDIDATES = "吗嗎呢啦喇啊呀啰啵啲！!？?。．."
 LEADING_PUNCT = "，,。.!！？?；;：:、… “”\"'（）()《》〈〉-—  "
+END_BOUNDARY = set("，,。.!！？?；;：:、… “”\"'（）()《》〈〉-—  ")
 SHORT_FALLBACK_LEN = 8
 
 
@@ -277,6 +278,7 @@ def refine_chunk(original: str, candidate: str, script_text: str) -> str:
 
     refined = cleaned_candidate
     refined = _trim_leading_noise(refined, stripped_original)
+    refined = _extend_by_context(refined, stripped_original, script_text)
     refined = _align_suffix(refined, stripped_original, script_text)
     return refined.strip()
 
@@ -306,6 +308,25 @@ def _align_suffix(candidate: str, original: str, script_text: str) -> str:
                 if next_char == last_char:
                     trimmed_candidate = (candidate + last_char).strip()
     return trimmed_candidate
+
+
+def _extend_by_context(candidate: str, original: str, script_text: str) -> str:
+    if not original or len(candidate) >= len(original):
+        return candidate
+    idx = script_text.find(candidate)
+    if idx == -1:
+        return candidate
+    needed = len(original) - len(candidate)
+    pos = idx + len(candidate)
+    extended = candidate
+    while needed > 0 and pos < len(script_text):
+        char = script_text[pos]
+        extended += char
+        pos += 1
+        needed -= 1
+        if char in END_BOUNDARY:
+            break
+    return extended
 
 
 __all__ = [
