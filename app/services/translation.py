@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import logging
 import os
 from pathlib import Path
 from typing import List, Optional
@@ -8,11 +11,16 @@ from openai import OpenAI
 
 from ..subtitle_core import parse_srt_text
 
+LOGGER = logging.getLogger("subtitle-review.translation")
+
 APP_DIR = Path(__file__).resolve().parent.parent
 ROOT_DIR = APP_DIR.parent
 BASELINE_INPUT = ROOT_DIR / "baseline" / "input_subtiles" / "letter_0_input.srt"
 BASELINE_GT = ROOT_DIR / "baseline" / "groundtruth" / "letter_0_gt.srt"
 ENV_PATH = ROOT_DIR / ".env"
+CACHE_DIR = ROOT_DIR / "baseline" / "cache"
+CACHE_INDEX_PATH = CACHE_DIR / "index.json"
+CACHE_LIMIT = 5
 
 _ENV_LOADED = False
 
@@ -83,6 +91,12 @@ def translate_subtitles_to_cantonese(subtitle_text: str) -> str:
     if not subtitle_text.strip():
         return subtitle_text
 
+    digest = _compute_digest(subtitle_text)
+    cache_hit = _load_from_cache(digest)
+    if cache_hit:
+        LOGGER.info("Using cached translation (hash %s)", digest[:10])
+        return cache_hit
+
     original_entries = parse_srt_text(subtitle_text)
     _load_env_file()
     api_key = os.environ.get("DEEPSEEK_API_KEY")
@@ -115,30 +129,123 @@ def translate_subtitles_to_cantonese(subtitle_text: str) -> str:
             raise TranslationError("翻译结果为空，请稍后重试。")
         return content
 
-    if len(original_entries) <= FULL_PASS_THRESHOLD:
+    LOGGER.info("Translating subtitle in a single pass (%d entries).", len(original_entries))
+    result_text: Optional[str] = None
+    try:
         first_pass = _translate_block(subtitle_text)
-        try:
-            translated_entries = parse_srt_text(first_pass)
-            if len(translated_entries) == len(original_entries):
-                return first_pass
-        except Exception:
-            pass  # fallback to chunk translation
+        translated_entries = parse_srt_text(first_pass)
+        if len(translated_entries) == len(original_entries):
+            result_text = first_pass
+    except Exception:
+        result_text = None
 
-    # Fallback: translate in manageable chunks to preserve structure.
-    combined_blocks: List[str] = []
-    total_chunks = (len(original_entries) + CHUNK_SIZE - 1) // CHUNK_SIZE
-    for idx in range(0, len(original_entries), CHUNK_SIZE):
-        chunk_entries = original_entries[idx : idx + CHUNK_SIZE]
-        chunk_lines: List[str] = []
-        for entry in chunk_entries:
-            block = [str(entry.index), f"{entry.start} --> {entry.end}", *entry.text_lines, ""]
-            chunk_lines.extend(block)
-        chunk_text = "\n".join(chunk_lines).strip() + "\n"
-        chunk_no = idx // CHUNK_SIZE + 1
-        extra_note = f"\n（当前为第 {chunk_no}/{total_chunks} 部分，只需翻译以下条目，勿更改任意编号或时间轴。）"
-        chunk_result = _translate_block(chunk_text, extra_note=extra_note)
-        parsed_chunk = parse_srt_text(chunk_result)
-        if len(parsed_chunk) != len(chunk_entries):
-            raise TranslationError("分段翻译输出结构异常，请稍后重试。")
-        combined_blocks.append(chunk_result.strip())
-    return "\n\n".join(combined_blocks).strip() + "\n"
+    if result_text is None:
+        LOGGER.info("Falling back to chunked translation (%d entries, chunk=%d).", len(original_entries), CHUNK_SIZE)
+        combined_blocks: List[str] = []
+        total_chunks = (len(original_entries) + CHUNK_SIZE - 1) // CHUNK_SIZE
+        for idx in range(0, len(original_entries), CHUNK_SIZE):
+            chunk_entries = original_entries[idx : idx + CHUNK_SIZE]
+            chunk_lines: List[str] = []
+            for entry in chunk_entries:
+                block = [str(entry.index), f"{entry.start} --> {entry.end}", *entry.text_lines, ""]
+                chunk_lines.extend(block)
+            chunk_text = "\n".join(chunk_lines).strip() + "\n"
+            chunk_no = idx // CHUNK_SIZE + 1
+            extra_note = (
+                f"\n（当前为第 {chunk_no}/{total_chunks} 部分，只需翻译以下条目，勿更改任意编号或时间轴。）"
+            )
+            LOGGER.info("Translating chunk %d/%d ...", chunk_no, total_chunks)
+            chunk_result = _translate_block(chunk_text, extra_note=extra_note)
+            parsed_chunk = parse_srt_text(chunk_result)
+            if len(parsed_chunk) != len(chunk_entries):
+                raise TranslationError("分段翻译输出结构异常，请稍后重试。")
+            combined_blocks.append(chunk_result.strip())
+        result_text = "\n\n".join(combined_blocks).strip() + "\n"
+
+    _save_to_cache(digest, result_text)
+    return result_text
+
+
+def _compute_digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _cache_path_for_digest(digest: str) -> Path:
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    return CACHE_DIR / f"{digest}.srt"
+
+
+def _load_cache_index() -> List[str]:
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    if not CACHE_INDEX_PATH.exists():
+        return []
+    try:
+        raw = CACHE_INDEX_PATH.read_text(encoding="utf-8")
+        data = json.loads(raw)
+        if isinstance(data, list):
+            return [str(item) for item in data]
+    except Exception:
+        pass
+    return []
+
+
+def _save_cache_index(index: List[str]) -> None:
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        CACHE_INDEX_PATH.write_text(json.dumps(index, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _prune_cache(index: List[str]) -> List[str]:
+    if len(index) <= CACHE_LIMIT:
+        return index
+    stale = index[CACHE_LIMIT:]
+    for digest in stale:
+        path = _cache_path_for_digest(digest)
+        if path.exists():
+            try:
+                path.unlink()
+            except OSError:
+                pass
+    return index[:CACHE_LIMIT]
+
+
+def _touch_cache_digest(digest: str) -> None:
+    index = _load_cache_index()
+    if digest in index:
+        index.remove(digest)
+    index.insert(0, digest)
+    index = _prune_cache(index)
+    _save_cache_index(index)
+
+
+def _remove_cache_digest(digest: str) -> None:
+    index = _load_cache_index()
+    if digest in index:
+        index.remove(digest)
+        _save_cache_index(index)
+
+
+def _load_from_cache(digest: str) -> Optional[str]:
+    cache_path = _cache_path_for_digest(digest)
+    if not cache_path.exists():
+        _remove_cache_digest(digest)
+        return None
+    try:
+        content = cache_path.read_text(encoding="utf-8")
+    except Exception:
+        _remove_cache_digest(digest)
+        return None
+    _touch_cache_digest(digest)
+    return content
+
+
+def _save_to_cache(digest: str, translated: str) -> None:
+    cache_path = _cache_path_for_digest(digest)
+    try:
+        cache_path.write_text(translated, encoding="utf-8")
+        LOGGER.info("Cached translation at %s", cache_path)
+    except Exception:
+        return
+    _touch_cache_digest(digest)

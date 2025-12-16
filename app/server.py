@@ -24,7 +24,8 @@ APP_DIR = Path(__file__).resolve().parent
 ROOT_DIR = APP_DIR.parent
 STATIC_DIR = ROOT_DIR / "static"
 MAX_UPLOAD_SIZE = 8 * 1024 * 1024  # 8MB per request
-SESSION_TTL_SECONDS = 60 * 60
+# Session lasts for 8 hours so long edits are safe
+SESSION_TTL_SECONDS = 8 * 60 * 60
 
 logging.basicConfig(level=logging.INFO)
 LOGGER = logging.getLogger("subtitle-review")
@@ -72,6 +73,24 @@ class SessionStore:
 
 
 SESSION_STORE = SessionStore()
+
+
+def _session_seconds_remaining(session_data: Optional[Dict[str, Any]]) -> Optional[int]:
+    if not session_data:
+        return None
+    created_at = session_data.get("created_at")
+    if not isinstance(created_at, (int, float)):
+        return SESSION_TTL_SECONDS
+    remaining = int(SESSION_TTL_SECONDS - (time.time() - created_at))
+    return max(0, remaining)
+
+
+def _format_duration(seconds: int) -> str:
+    seconds = max(0, seconds)
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    secs = seconds % 60
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
 def build_entry_payload(entries: List[SubtitleEntry], chunks: List[str]) -> List[Dict[str, Any]]:
@@ -201,7 +220,7 @@ class SubtitleRequestHandler(BaseHTTPRequestHandler):
     </main>
   </body>
 </html>
-"""
+        """
 
     def render_review(
         self,
@@ -211,10 +230,52 @@ class SubtitleRequestHandler(BaseHTTPRequestHandler):
         result_srt: Optional[str] = None,
         script_name: Optional[str] = None,
         srt_name: Optional[str] = None,
+        ttl_seconds: Optional[int] = None,
     ) -> str:
         alert_html = ""
         if message:
             alert_html = f'<div class="alert alert-success">{html.escape(message)}</div>'
+        countdown_html = ""
+        countdown_script = ""
+        if ttl_seconds is not None:
+            ttl_display = _format_duration(ttl_seconds)
+            countdown_html = f"""
+            <div class="session-countdown" data-session-ttl="{max(0, ttl_seconds)}">
+              <div>
+                <span>会话将在 <strong data-countdown-text>{ttl_display}</strong> 后过期</span>
+                <small>超时后需要重新上传文件。</small>
+              </div>
+            </div>
+            """
+            countdown_script = (
+                "<script>\n"
+                "  (function() {\n"
+                "    const container = document.querySelector('.session-countdown[data-session-ttl]');\n"
+                "    if (!container) return;\n"
+                "    const textEl = container.querySelector('[data-countdown-text]');\n"
+                "    if (!textEl) return;\n"
+                "    let remaining = parseInt(container.getAttribute('data-session-ttl'), 10);\n"
+                "    if (Number.isNaN(remaining)) return;\n"
+                "    function format(sec) {\n"
+                "      if (sec < 0) sec = 0;\n"
+                "      const h = String(Math.floor(sec / 3600)).padStart(2, '0');\n"
+                "      const m = String(Math.floor((sec % 3600) / 60)).padStart(2, '0');\n"
+                "      const s = String(sec % 60).padStart(2, '0');\n"
+                "      return h + ':' + m + ':' + s;\n"
+                "    }\n"
+                "    function tick() {\n"
+                "      textEl.textContent = format(remaining);\n"
+                "      if (remaining <= 0) {\n"
+                "        container.classList.add('session-countdown-expired');\n"
+                "        return;\n"
+                "      }\n"
+                "      remaining -= 1;\n"
+                "      window.setTimeout(tick, 1000);\n"
+                "    }\n"
+                "    tick();\n"
+                "  })();\n"
+                "</script>\n"
+            )
         preview_html = ""
         if result_srt:
             escaped = html.escape(result_srt)
@@ -256,6 +317,7 @@ class SubtitleRequestHandler(BaseHTTPRequestHandler):
           </div>
           <a href="/" class="btn secondary">重新上传</a>
         </div>
+        {countdown_html}
       </section>
       <form method="post" action="/save" class="panel">
         <input type="hidden" name="session_id" value="{session_id}" />
@@ -267,10 +329,11 @@ class SubtitleRequestHandler(BaseHTTPRequestHandler):
         </div>
       </form>
       {preview_html}
+      {countdown_script}
     </main>
   </body>
 </html>
-"""
+        """
 
     def render_entry(self, entry: Dict[str, Any]) -> str:
         script_html = html.escape(entry["script_chunk"])
@@ -360,12 +423,15 @@ class SubtitleRequestHandler(BaseHTTPRequestHandler):
                 "result_srt": None,
             }
         )
+        session_snapshot = SESSION_STORE.get(session_id)
+        ttl_seconds = _session_seconds_remaining(session_snapshot)
         page = self.render_review(
             payload_entries,
             session_id,
             message=translation_message,
             script_name=script_item.filename,
             srt_name=srt_item.filename,
+            ttl_seconds=ttl_seconds,
         )
         self._send_html(page)
 
@@ -402,7 +468,10 @@ class SubtitleRequestHandler(BaseHTTPRequestHandler):
         result_srt = "\n\n".join(blocks) + "\n"
         session["entries"] = entry_payloads
         session["result_srt"] = result_srt
+        session["created_at"] = time.time()
         SESSION_STORE.set(session_id, session)
+        refreshed = SESSION_STORE.get(session_id)
+        ttl_seconds = _session_seconds_remaining(refreshed)
         page = self.render_review(
             entry_payloads,
             session_id,
@@ -410,6 +479,7 @@ class SubtitleRequestHandler(BaseHTTPRequestHandler):
             result_srt=result_srt,
             script_name=session.get("script_name"),
             srt_name=session.get("srt_name"),
+            ttl_seconds=ttl_seconds,
         )
         self._send_html(page)
 

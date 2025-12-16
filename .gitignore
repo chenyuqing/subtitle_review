@@ -12,6 +12,7 @@ __pycache__/
 .server.pid
 .env
 *.log
+baseline/cache/
 
 # Generated test outputs
 test_output_*.srt

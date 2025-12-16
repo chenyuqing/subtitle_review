@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from app.services.translation import TranslationError, translate_subtitles_to_cantonese
 from app.subtitle_aligner import align_script_to_entries, prepare_script_text
 from app.subtitle_core import SubtitleEntry, parse_srt_text, wrap_chunk
 
@@ -53,6 +54,11 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.95,
         help="中高分区间上限（不含）。",
+    )
+    parser.add_argument(
+        "--translate-subtitles",
+        action="store_true",
+        help="先将普通话字幕翻译为粤语再分析（使用 DeepSeek 缓存）。",
     )
     return parser.parse_args()
 
@@ -107,10 +113,22 @@ def _first_existing(directory: Path, candidates: List[str]) -> Path | None:
     return None
 
 
-def evaluate_sample(sample: Sample, low_threshold: float, mid_min: float, mid_max: float) -> None:
+def evaluate_sample(
+    sample: Sample,
+    low_threshold: float,
+    mid_min: float,
+    mid_max: float,
+    translate_subtitles: bool = False,
+) -> None:
     script_text = sample.script_path.read_text(encoding="utf-8")
     input_srt = sample.input_sub_path.read_text(encoding="utf-8")
     gt_srt = sample.groundtruth_path.read_text(encoding="utf-8")
+
+    if translate_subtitles:
+        try:
+            input_srt = translate_subtitles_to_cantonese(input_srt)
+        except TranslationError as exc:
+            raise RuntimeError(f"{sample.name}: 字幕翻译失败 - {exc}") from exc
 
     entries = parse_srt_text(input_srt)
     gt_entries = parse_srt_text(gt_srt)
@@ -184,7 +202,13 @@ def main() -> None:
     args = parse_args()
     samples = discover_samples(args.baseline_dir)
     for sample in samples:
-        evaluate_sample(sample, args.low_threshold, args.mid_min, args.mid_max)
+        evaluate_sample(
+            sample,
+            args.low_threshold,
+            args.mid_min,
+            args.mid_max,
+            translate_subtitles=args.translate_subtitles,
+        )
 
 
 if __name__ == "__main__":

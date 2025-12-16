@@ -4,7 +4,7 @@ Subtitle alignment with semantic matching and character count preservation.
 from __future__ import annotations
 
 import re
-from typing import List
+from typing import List, Optional
 
 from .subtitle_core import SubtitleEntry, format_entries, format_srt, parse_srt_text, wrap_chunk
 
@@ -161,12 +161,15 @@ def align_script_to_entries(script_text: str, entries: List[SubtitleEntry]) -> L
     Preserves timing, line count, and character count structure.
     """
     chunks: List[str] = []
+    prev_chunk: Optional[str] = None
     for entry in entries:
         original = entry.plain_text
         # Find similar content in script
         similar = find_similar_content(original, script_text)
         refined = refine_chunk(original, similar, script_text)
+        refined = _third_pass_cleanup(refined, original, prev_chunk, script_text)
         chunks.append(refined)
+        prev_chunk = refined
     return chunks
 
 
@@ -264,6 +267,9 @@ SUFFIX_CANDIDATES = "吗嗎呢啦喇啊呀啰啵啲！!？?。．."
 LEADING_PUNCT = "，,。.!！？?；;：:、… “”\"'（）()《》〈〉-—  "
 END_BOUNDARY = set("，,。.!！？?；;：:、… “”\"'（）()《》〈〉-—  ")
 SHORT_FALLBACK_LEN = 8
+TAIL_SENSITIVE = set("0123456789年月日号點点%的嘅了啦喇佢他她")
+MAX_SUFFIX_EXTENSION = 14
+THIRD_PASS_SKIP_THRESHOLD = 0.97
 
 
 def refine_chunk(original: str, candidate: str, script_text: str) -> str:
@@ -355,3 +361,92 @@ def _direct_short_match(original: str, script_text: str) -> str:
         if idx_ci != -1:
             return script_text[idx_ci:idx_ci + len(cand)]
     return ""
+
+
+def _third_pass_cleanup(
+    current: str,
+    original: str,
+    prev_chunk: Optional[str],
+    script_text: str,
+) -> str:
+    """Remove duplicated prefixes and extend truncated suffixes."""
+    if not current.strip():
+        return current
+    if _should_skip_cleanup(current, original):
+        return current
+    adjusted = current.strip()
+    adjusted = _remove_redundant_prefix(adjusted, original, prev_chunk)
+    adjusted = _extend_suffix_boundary(adjusted, original, script_text)
+    return adjusted
+
+
+def _should_skip_cleanup(candidate: str, original: str) -> bool:
+    if not candidate.strip() or not original.strip():
+        return False
+    normalized_candidate = re.sub(r"\s+", "", candidate)
+    normalized_original = re.sub(r"\s+", "", original)
+    if not normalized_candidate or not normalized_original:
+        return False
+    from difflib import SequenceMatcher
+
+    ratio = SequenceMatcher(None, normalized_candidate, normalized_original).ratio()
+    return ratio >= THIRD_PASS_SKIP_THRESHOLD
+
+
+def _remove_redundant_prefix(chunk: str, original: str, prev_chunk: Optional[str]) -> str:
+    if not prev_chunk or len(chunk) < 2:
+        return chunk
+    overlap_limit = min(4, len(chunk), len(prev_chunk))
+    target = original.strip()
+    cleaned = chunk
+    for length in range(overlap_limit, 1, -1):
+        prefix = chunk[:length]
+        if prev_chunk[-length:] != prefix:
+            continue
+        # 如果原句也以该前缀开头，说明是正常内容
+        if target.startswith(prefix):
+            continue
+        candidate = chunk[length:].lstrip()
+        # 避免裁剪得太短
+        if len(candidate) < max(2, int(len(target) * 0.6)):
+            continue
+        cleaned = candidate
+        break
+    return cleaned
+
+
+def _needs_suffix_extension(candidate: str, original: str) -> bool:
+    if not candidate.strip() or not original.strip():
+        return False
+    delta = len(original.strip()) - len(candidate.strip())
+    if delta >= 3:
+        return True
+    last_char = candidate.strip()[-1]
+    orig_last = original.strip()[-1]
+    if last_char in TAIL_SENSITIVE:
+        return True
+    if last_char not in END_BOUNDARY and orig_last in END_BOUNDARY:
+        return True
+    return False
+
+
+def _extend_suffix_boundary(candidate: str, original: str, script_text: str) -> str:
+    if not _needs_suffix_extension(candidate, original):
+        return candidate
+    idx = script_text.find(candidate)
+    if idx == -1:
+        return candidate
+    cursor = idx + len(candidate)
+    extended = candidate
+    added = 0
+    while cursor < len(script_text) and added < MAX_SUFFIX_EXTENSION:
+        char = script_text[cursor]
+        extended += char
+        cursor += 1
+        added += 1
+        if char in END_BOUNDARY and added >= 1:
+            break
+    trimmed = extended.strip()
+    if len(trimmed) - len(original.strip()) > 10:
+        return candidate
+    return trimmed
